@@ -1,8 +1,6 @@
 
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# name: 全棉时代签到
-# cron: 30 8 * * *
 """
 项目: 全棉时代 - 每日签到 + 种棉花(自动种树 + 浇水)
 入口: 微信小程序「全棉时代」-> 我的·每日签到 / 首页·种棉花
@@ -10,17 +8,14 @@
       完成每日签到(得积分); 若为已注册会员, 再对自己的树执行种棉花浇水。
       账号尚未种树时会自动种下一棵(选定成长目标奖品), 之后每日自动浇水。
       每次运行现取 code、现登录, 不再依赖手动粘贴的 code#token(易过期)。
-
 环境变量:
-  YYB_SERVER          每行：地址@账号标识（例如 http://yyb-go:8000@1）
-  YYB_API_KEY         可选；yyb-go 配置 YYB_PROTOCOL_TOKEN 时填同一令牌
-  qmzmh_prize_id      种树时的成长目标奖品 id, 默认 1046(加厚棉柔巾 6片/包*1包);
-                      可选值来自 GET https://sg01.purcotton.com/api/prize/home
-  QMZMH_NOTIFY        0 关闭青龙通知；默认 1
-
-参考模版：Template/hsy.py —— 取码与账号来源改走 YYB-Go，
-不再依赖 wx_server_url / wx_auth 桥接服务。
-本文件是 wxapp/quanmianshidai.py 的 YYB-Go 版，原桥接版脚本保持不变。
+  YYB_SERVER    每行：地址@账号标识（例如 http://yyb-go:8000@1）
+  YYB_API_KEY   可选；yyb-go 配置 YYB_PROTOCOL_TOKEN 时填同一令牌
+参考模版: Template/hsy.py —— 本文件是 wxapp/quanmianshidai.py 的 YYB-Go 版。
+可选变量: qmzmh_prize_id  种树时的成长目标奖品 id, 默认 1046(加厚棉柔巾 6片/包*1包);
+          可选值来自 GET https://sg01.purcotton.com/api/prize/home
+# name: 全棉时代签到
+# cron: 30 8 * * *
 """
 
 import os
@@ -41,13 +36,97 @@ if hasattr(sys.stdout, "reconfigure"):
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
+try:
+    from notify import send
+except Exception:
+    def send(title, content):
+        print(f"\n===== {title} =====\n{content}")
+
 # 配置参数 (均来自小程序反编译源码, 非机密)
 MINI_APP_ID = "wxdfcaa44b1aa891a7"
 NMP = "https://nmp.pureh2b.com"                 # config.js SERVER (生产)
 SG01 = "https://sg01.purcotton.com"             # config.js 种棉花 H5 与其 /api
 PRIZE_ID_DEFAULT = "1046"                       # 种树默认成长目标: 加厚棉柔巾 6片/包*1包
 base_url = "https://hxxxy.gov.cn"               # 旧占位常量, 保留兼容
-TIMEOUT = 30                                    # YYB 取码 / 业务接口
+# smallcat / wx_server 配置 (机密, 从环境变量读取, 绝不硬编码)
+# ---------------------------------------------------------------------------
+# YYB-Go：账号与取码（参考 Template/hsy.py）
+# ---------------------------------------------------------------------------
+def routes():
+    # YYB_SERVER 每行：地址@账号标识
+    values = []
+    for lineno, raw in enumerate(os.getenv("YYB_SERVER", "").splitlines(), 1):
+        raw = raw.strip()
+        if not raw:
+            continue
+        if "@" not in raw:
+            raise RuntimeError(f"YYB_SERVER 第 {lineno} 行格式错误，应为 地址@账号标识")
+        server, ref = raw.rsplit("@", 1)
+        server, ref = server.strip().rstrip("/"), ref.strip()
+        if not server or not ref:
+            raise RuntimeError(f"YYB_SERVER 第 {lineno} 行格式错误，应为 地址@账号标识")
+        if not server.startswith(("http://", "https://")):
+            server = "http://" + server
+        values.append((server, ref))
+    if not values:
+        raise RuntimeError("未配置 YYB_SERVER（每行：地址@账号标识）")
+    return values
+
+
+def yyb_code(server, ref):
+    # YYB-Go：POST /wxapp/getCode {"ref": 账号标识, "app_id": 小程序 APPID}。
+    # wx.login code 短期且一次性，失败即抛错，不重放后面的业务请求。
+    headers = {"Content-Type": "application/json"}
+    api_key = os.getenv("YYB_API_KEY", "").strip()
+    if api_key:
+        headers["Authorization"] = "Bearer " + api_key
+    response = requests.post(
+        f"{server}/wxapp/getCode",
+        json={"ref": ref, "app_id": MINI_APP_ID},
+        headers=headers,
+        timeout=30,
+    )
+    response.raise_for_status()
+    try:
+        body = response.json()
+    except ValueError as exc:
+        raise RuntimeError(f"YYB 取 code 返回非 JSON：HTTP {response.status_code}") from exc
+    if int(body.get("code", -1)) != 0:
+        raise RuntimeError(f"YYB 取 code 失败：{body.get('msg') or body.get('message') or body}")
+    result = (body.get("data") or {}).get("result")
+    code = result if isinstance(result, str) else (result or {}).get("code")
+    if not code:
+        raise RuntimeError("YYB 未返回 data.result.code")
+    return str(code)
+
+
+def yyb_phone_code(server, ref):
+    # YYB-Go：POST /wxapp/getPhoneNumber {"ref": 账号标识, "app_id": 小程序 APPID}
+    headers = {"Content-Type": "application/json"}
+    api_key = os.getenv("YYB_API_KEY", "").strip()
+    if api_key:
+        headers["Authorization"] = "Bearer " + api_key
+    response = requests.post(
+        f"{server}/wxapp/getPhoneNumber",
+        json={"ref": ref, "app_id": MINI_APP_ID},
+        headers=headers,
+        timeout=60,
+    )
+    response.raise_for_status()
+    body = response.json()
+    if int(body.get("code", -1)) != 0:
+        raise RuntimeError(f"YYB 取手机号失败：{body.get('msg') or body.get('message') or body}")
+    data = body.get("data") or {}
+    result = data.get("result") or data
+    code = result.get("code") or data.get("code")
+    if not code:
+        raise RuntimeError("YYB 未返回手机号 code")
+    return str(code)
+
+
+def mask(ref):
+    return ref if len(ref) <= 12 else f"{ref[:6]}...{ref[-4:]}"
+
 TOKEN_CACHE_PATH = Path(__file__).with_name("quanmianshidai_token_cache.json")
 session = requests.Session()
 user_agent = "Mozilla/5.0 (Linux; Android 11; ONEPLUS A6000 Build/RKQ1.201217.002; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/116.0.0.0 Mobile Safari/537.36 XWEB/1160065 MMWEBSDK/20231201 MMWEBID/2930 MicroMessenger/8.0.45.2521(0x28002D3D) WeChat/arm64 Weixin NetType/WIFI Language/zh_CN ABI/arm64 miniProgram/wxdfcaa44b1aa891a7"
@@ -113,7 +192,7 @@ def sg01_sign(params):
 
 
 # ---------------------------------------------------------------------------
-# YYB-Go + nmp 登录 (每次运行现取 wx.login code, 现登录, 不存长期令牌)
+# smallcat + nmp 登录 (每次运行现取 wx.login code, 现登录, 不存长期令牌)
 # ---------------------------------------------------------------------------
 def mask(value):
     if not value:
@@ -143,52 +222,22 @@ def write_token_cache(cache):
         print(f"⚠️ 写入token缓存失败: {e}")
 
 
-def routes():
-    # YYB_SERVER 每行：地址@账号标识（与 Template/hsy.py 一致）。
-    values = []
-    for lineno, raw in enumerate(os.getenv("YYB_SERVER", "").splitlines(), 1):
-        raw = raw.strip()
-        if not raw:
-            continue
-        if "@" not in raw:
-            raise RuntimeError(f"YYB_SERVER 第 {lineno} 行格式错误，应为 地址@账号标识")
-        server, ref = raw.rsplit("@", 1)
-        server, ref = server.strip().rstrip("/"), ref.strip()
-        if not server or not ref:
-            raise RuntimeError(f"YYB_SERVER 第 {lineno} 行格式错误，应为 地址@账号标识")
-        if not server.startswith(("http://", "https://")):
-            server = "http://" + server
-        values.append((server, ref))
-    if not values:
-        raise RuntimeError("未配置 YYB_SERVER（每行：地址@账号标识）")
-    return values
+# 当前账号的 YYB 服务地址（main 遍历账号时写入；取码需要 服务地址 + 账号标识）
+YYB_SERVER_URL = ""
 
 
-def yyb_code(server, ref):
-    # YYB-Go：POST /wxapp/getCode {"ref": 账号标识, "app_id": 小程序 APPID}。
-    # 同账号取码由 YYB-Go 串行化；code 短期且一次性，失败即抛错。
-    headers = {"Content-Type": "application/json"}
-    api_key = os.getenv("YYB_API_KEY", "").strip()
-    if api_key:
-        headers["Authorization"] = "Bearer " + api_key
-    response = requests.post(
-        f"{server}/wxapp/getCode",
-        json={"ref": ref, "app_id": MINI_APP_ID},
-        headers=headers,
-        timeout=TIMEOUT,
-    )
-    response.raise_for_status()
-    try:
-        body = response.json()
-    except ValueError as exc:
-        raise RuntimeError(f"YYB 取 code 返回非 JSON：HTTP {response.status_code}") from exc
-    if int(body.get("code", -1)) != 0:
-        raise RuntimeError(f"YYB 取 code 失败：{body.get('msg') or body.get('message') or body}")
-    result = (body.get("data") or {}).get("result")
-    code = result if isinstance(result, str) else (result or {}).get("code")
-    if not code:
-        raise RuntimeError("YYB 未返回 data.result.code")
-    return str(code)
+# YYB-Go: 账号标识 -> wx.login code（同账号取码由 YYB 串行处理，不需要再 /wx/refresh）
+def get_wx_code(openid):
+    last_msg = ""
+    for attempt in range(4):
+        if attempt:
+            time.sleep(3)
+        try:
+            return yyb_code(YYB_SERVER_URL, openid)
+        except Exception as exc:
+            last_msg = str(exc)
+    raise RuntimeError(f"YYB-Go 获取 code 失败(已重试): {last_msg}")
+
 
 
 def nmp_headers(guid, token=None):
@@ -199,14 +248,14 @@ def nmp_headers(guid, token=None):
     return h
 
 
-def nmp_login(server, ref, guid):
+def nmp_login(openid, guid):
     """wx.login code -> GET /api/wx/main/login。返回 (token, member, bind)。
 
     member 为 None 或无 phone 表示尚未绑定手机号/注册, 无法签到。
     """
-    wxcode = yyb_code(server, ref)
+    wxcode = get_wx_code(openid)
     resp = session.get(f"{NMP}/api/wx/main/login", params={"code": wxcode},
-                       headers=nmp_headers(guid), timeout=TIMEOUT)
+                       headers=nmp_headers(guid), timeout=30)
     resp.raise_for_status()
     body = resp.json()
     data = body.get("data") if isinstance(body.get("data"), dict) else None
@@ -218,15 +267,17 @@ def nmp_login(server, ref, guid):
     return token, member, bind
 
 
-def get_account_session(server, ref, index):
+def get_account_session(openid, index):
     """现取 code、现登录, 复用缓存的设备 GUID。返回 (guid, token, member, bind)。"""
     cache = read_token_cache()
-    entry = cache.get(ref) or {}
+    entry = cache.get(openid) or {}
     guid = entry.get("guid") or gen_guid()
-    token, member, bind = nmp_login(server, ref, guid)
+    token, member, bind = nmp_login(openid, guid)
     phone = member.get("phone") if isinstance(member, dict) else None
-    cache[ref] = {"guid": guid, "hasPhone": bool(phone), "updatedAt": int(time.time())}
+    cache[openid] = {"guid": guid, "hasPhone": bool(phone), "updatedAt": int(time.time())}
     write_token_cache(cache)
+    tag = "已绑定手机号会员" if phone else f"未绑定(bind={bind})"
+    print(f"账号 {index} nmp登录: token={mask(token)} {tag}")
     return guid, token, member, bind
 
 
@@ -1022,75 +1073,87 @@ def process_all_friends(friends_user_ids, code, token):
 
 
 
-def notify(lines):
-    if os.getenv("QMZMH_NOTIFY", "1").lower() in {"0", "false", "no"}:
-        return
-    for path in (os.path.dirname(os.path.abspath(__file__)), "/ql/data/scripts", "/ql/scripts"):
-        if path not in sys.path:
-            sys.path.insert(0, path)
-    try:
-        from notify import send
-        send("全棉时代签到", "\n".join(lines))
-    except Exception as exc:
-        print(f"[通知] 发送失败（不影响任务）：{exc}")
-
-
-def run_one(index, server, ref):
-    result = [f"账号 {index}（YYB {mask(ref)}）"]
-    try:
-        guid, token, member, bind = get_account_session(server, ref, index)
-        if not token:
-            result.append("失败：登录失败(nmp未返回token)")
-            return result
-
-        phone = member.get("phone") if isinstance(member, dict) else None
-        if not (isinstance(member, dict) and phone):
-            result.append("该账号尚未绑定手机号(需先在小程序「全棉时代」内完成手机号授权"
-                          "注册为会员后, 才能签到/种棉花)")
-            return result
-
-        # 核心动作: 每日签到
-        ok, sign_msg = member_sign_in(guid, token)
-        result.append(sign_msg if ok else f"失败：{sign_msg}")
-
-        # 种棉花: 仅给「自己的树」浇水 (沿用原 sg01 游戏流程)。
-        # sg01 侧需再登录一次拿到 phone/user_id; 失败仅提示, 不影响签到结果。
-        try:
-            sg_phone, sg_uid = login(guid, token)
-            if sg_phone and sg_uid:
-                cscscs(guid, token)   # 刷新/领取日常
-                watered = jscz(guid, token)   # 浇水(种棉花), 只浇自己的树
-                pdrw(guid, token)     # 日常任务判断
-                result.append("种棉花: 已完成浇水/日常任务" if watered else
-                              "种棉花: 日常任务已完成; 种树/浇水未成功, 详见日志")
-            else:
-                result.append("种棉花: sg01 未登录, 已跳过")
-        except Exception as e:
-            result.append(f"种棉花: 异常已忽略（{e}）")
-        # 说明: 原脚本的「给好友浇水」(process_all_friends) 是把自身水量消耗到
-        #       他人的树上, 属社交/代浇, 非「种自己的树」目标, 按安全约束停用。
-    except Exception as exc:
-        result.append(f"失败：{exc}")
-    print("\n".join(result))
-    return result
-
-
 def main():
     try:
-        sys.stdout.reconfigure(encoding="utf-8")
-    except AttributeError:
-        pass
-
-    accounts = routes()
-    if len(accounts) > 20:
+        route_list = routes()
+    except RuntimeError as exc:
+        print(f"❌ {exc}")
+        return
+    accounts = [ref for _server, ref in route_list]
+    total = len(accounts)
+    if total > 20:
         print("账号数量超过20个，不执行操作。")
         return
 
-    output = ["全棉时代：每日签到 + 种棉花"]
-    for index, (server, ref) in enumerate(accounts, 1):
-        output.extend(run_one(index, server, ref))
+    print("=============== 全棉时代 签到开始 ===============")
+    summaries = []
+    ok_count = 0
+    for index, (server, ref) in enumerate(route_list, start=1):
+        global YYB_SERVER_URL
+        YYB_SERVER_URL = server
+        parts = str(ref).split('#', 1)
+        openid = parts[0].strip()
+        remark = parts[1].strip() if len(parts) > 1 else ""
+        print()
+        print(f"------账号{index}/{total}，备注: {remark}-------")
+        lines = [f"【账号 {index}{('/' + remark) if remark else ''}】"]
+        try:
+            guid, token, member, bind = get_account_session(openid, index)
+            if not token:
+                msg = "登录失败(nmp未返回token)"
+                print(f"❌ {msg}")
+                lines.append(f"❌ {msg}")
+                summaries.append("\n".join(lines))
+                continue
+
+            phone = member.get("phone") if isinstance(member, dict) else None
+            if not (isinstance(member, dict) and phone):
+                msg = ("该账号尚未绑定手机号(需先在小程序「全棉时代」内完成手机号授权"
+                       "注册为会员后, 才能签到/种棉花)")
+                print(f"⚠️ {msg}")
+                lines.append(f"⚠️ {msg}")
+                summaries.append("\n".join(lines))
+                continue
+
+            # 核心动作: 每日签到 (本次修复重点)
+            ok, sign_msg = member_sign_in(guid, token)
+            print(("🎉 " if ok else "❌ ") + sign_msg)
+            lines.append(("🎉 " if ok else "❌ ") + sign_msg)
+            ok_count += 1 if ok else 0
+
+            # 种棉花: 仅给「自己的树」浇水 (沿用原 sg01 游戏流程)。
+            # sg01 侧需再登录一次拿到 phone/user_id; 失败仅提示, 不影响签到结果。
+            try:
+                sg_phone, sg_uid = login(guid, token)
+                if sg_phone and sg_uid:
+                    cscscs(guid, token)   # 刷新/领取日常
+                    watered = jscz(guid, token)   # 浇水(种棉花), 只浇自己的树
+                    pdrw(guid, token)     # 日常任务判断
+                    if watered:
+                        lines.append("🌱 种棉花: 已完成浇水/日常任务")
+                    else:
+                        lines.append("🌱 种棉花: 日常任务已完成; 种树/浇水未成功, "
+                                     "详见日志")
+                else:
+                    print("种棉花: sg01 登录未通过, 跳过浇水(不影响签到)")
+                    lines.append("🌱 种棉花: sg01 未登录, 已跳过")
+            except Exception as e:
+                print(f"种棉花流程异常(忽略, 不影响签到): {e}")
+                lines.append("🌱 种棉花: 异常已忽略")
+            # 说明: 原脚本的「给好友浇水」(process_all_friends) 是把自身水量消耗到
+            #       他人的树上, 属社交/代浇, 非「种自己的树」目标, 按安全约束停用。
+        except Exception as e:
+            print(f"❌ 账号 {index} 执行异常: {e}")
+            lines.append(f"❌ 执行异常: {e}")
+        summaries.append("\n".join(lines))
         time.sleep(1)
-    notify(output)
+
+    print("\n=============== 全棉时代 签到结束 ===============")
+    title = f"全棉时代签到 {ok_count}/{total} 成功"
+    try:
+        send(title, "\n\n".join(summaries))
+    except Exception as e:
+        print(f"⚠️ 通知发送失败: {e}")
 
 
 if __name__ == "__main__":

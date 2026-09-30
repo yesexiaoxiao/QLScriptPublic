@@ -67,6 +67,11 @@ function yybRoutes() {
     return routes;
 }
 
+/** 账号标识（ref）列表，供脚本主循环直接当账号串用：for (const openid of yybAccounts()) */
+function yybAccounts() {
+    return yybRoutes().map((route) => route.ref);
+}
+
 class YYBClient {
     /**
      * @param {{appid?: string}} options appid 为目标小程序 AppID；
@@ -92,7 +97,9 @@ class YYBClient {
     /** 按账号标识定位服务地址；只有一个账号时允许用任意标识兜底 */
     routeOf(ref) {
         const key = String(ref === undefined || ref === null ? "" : ref).trim();
-        const hit = this.routes.find((route) => route.ref === key);
+        const base = key.split("#")[0];
+        // 兼容 ref#附加参数（例如 openid#appid#kdtId）这种写法：按 # 前一段匹配
+        const hit = this.routes.find((route) => route.ref === key) || (base ? this.routes.find((route) => route.ref === base) : null);
         if (hit) return hit;
         if (this.routes.length === 1) return this.routes[0];
         throw new Error(`YYB_SERVER 中没有账号标识 ${key || "(空)"}`);
@@ -196,4 +203,4 @@ class YYBClient {
     }
 }
 
-module.exports = { YYBClient, yybRoutes, maskRef, short };
+module.exports = { YYBClient, yybRoutes, yybAccounts, maskRef, short };

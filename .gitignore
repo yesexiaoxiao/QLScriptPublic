@@ -3,6 +3,11 @@ package*.json
 .gitignore
 .codex
 .czrc
+.reasonix/
 Tools/
+# tools/ and tools/yyb-convert must stay tracked: git treats "Tools/" as matching "tools/" on Windows
+!tools/
+!tools/yyb-convert/
 wxapp/*_token_cache.json
 daily/*_token_cache.json
+yyb/*_token_cache.json

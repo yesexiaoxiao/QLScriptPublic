@@ -1,17 +1,26 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+# 红色火箭(华夏基金) - 每日签到得积分
+# 入口: 微信小程序「红色火箭」-> 积分中心 -> 签到
 # name: 红色火箭签到
-# cron: 25 8 * * *
+# cron: 40 8 * * *
 #
 # 环境变量：
-#   YYB_SERVER          每行：地址@账号标识（例如 http://yyb-go:8000@1）
-#   YYB_API_KEY         可选；yyb-go 配置 YYB_PROTOCOL_TOKEN 时填同一令牌
-#   hshj_ticket         可选；手动 ticket, 格式 token 或 token#userId, 多账号按账号顺序换行/& 分割
-#   hshj_phone_login    是否允许用手机号能力自动登录, 默认 1(开启), 置 0 关闭
-#   hshj_ver            miniProgram.version, 默认 1.46.0
-#   HSHJ_NOTIFY         0 关闭青龙通知；默认 1
+#   YYB_SERVER         每行：地址@账号标识（例如 http://yyb-go:8000@1）
+#   YYB_API_KEY        可选；yyb-go 配置 YYB_PROTOCOL_TOKEN 时填同一令牌
+#   hshj_phone_login   是否允许用手机号授权自动登录, 默认 1(开启), 置 0 关闭
+#   hshj_encrypt_key   手动提供签名密钥：encrypt_key#key_version（YYB 无法自动取到，见 get_encrypt_key）
 #
-# 入口: 微信小程序「红色火箭」-> 积分中心 -> 签到
+# 参考模版：Template/hsy.py —— 由 YYB-Go 的 /wxapp/getCode 取 wx.login code，
+# 之后全部走小程序自己的业务接口（不再依赖 wx_server_url / wx_auth 桥接服务）。
+# 本文件是 wxapp/hongsehuojian.py 的 YYB-Go 版，原桥接版脚本保持不变。
+# 可选变量:
+#   hshj_ticket       手动 ticket, 格式 token 或 token#userId, 多账号用换行/& 分割(按账号顺序)
+#   hshj_phone_login  是否允许用 /wx/getphonenumber 自动登录, 默认 1(开启), 置 0 关闭
+#   hshj_ver          miniProgram.version, 默认 1.46.0
+#new Env("红色火箭签到")
+#cron 25 8 * * *
+#
 # ---------------------------------------------------------------------------
 # 接口契约(全部逆自反编译包 wx1b44c3ad181bde16 主包, 已逐行核对)
 #   base: https://index.amcfortune.com                     common/vendor.js:6290 (模块 6c8e)
@@ -33,7 +42,7 @@
 #              g()=unescape(encodeURIComponent()) 即 UTF-8      vendor.js:6960-7000
 #       Base64: 模块 b633 u.encode, 标准字母表 + "=" 补位         vendor.js:9720-9737
 #     appSecret = wx.getUserCryptoManager().getLatestUserKey().encryptKey
-#              -> YYB-Go POST /wx/encryptkey 的 data.encryptKey
+#              -> smallcat POST /wx/encryptkey 的 data.encrypt_key
 #     key_version = 同一响应的 data.version
 #   响应码(vendor.js:6341-6371): 0/200 成功; 7006 -> 重取 secure_path 加密列表;
 #     7005 -> 刷新用户 key 后重试一次; 407 -> ticket 失效, 清空 ticket/userId
@@ -52,24 +61,18 @@
 #   watchWordCustom/doExchange、point/task/completeTaskV3), 故明文 body。
 #
 # 已知限制(如实说明, 不猜接口):
-#   1. 签到页 pages_detail/ 在分包内, 分包 js 解包为空壳, 因此 getSignDays /
-#      userSignIn 的**业务入参无法从源码还原**。本脚本按「无额外入参」发送
-#      (GET 只带 key, POST 送 {}), 并在拿到 getSignDays 响应后把其中的
-#      activityNo/activityId 等活动标识透传给 userSignIn(存在才带), 不构造任何
-#      源码里没有的字段。
+#   1. 签到页 pages_detail/ 在分包内, smallcat /wx/downloadurl 按文档只返回主包,
+#      分包 js 解包为空壳, 因此 getSignDays / userSignIn 的**业务入参无法从源码还原**。
+#      本脚本按「无额外入参」发送(GET 只带 key, POST 送 {}), 并在拿到 getSignDays
+#      响应后把其中的 activityNo/activityId 等活动标识透传给 userSignIn(存在才带),
+#      不构造任何源码里没有的字段。
 #   2. 全包唯一发 ticket 的入口是 /fundex-uc/uc/v1/login, 且只接受
 #      wx.getPhoneNumber 的 code。实测服务端对本账号返回
 #      loginStatus=fail / loginDesc=用户登录失败(已试过 isAuthorized、去
 #      registerChannel、先建运行时会话、appSecret 冷启动态等多种忠实复刻),
 #      属服务端注册/风控策略, 不做绕过。若遇此情况请先在小程序内手动登录一次,
 #      或把 App 内已登录的 token 填到 hshj_ticket 变量。
-#   3. /wx/encryptkey 与手机号能力都要求账号在目标小程序侧真实可用; yyb-go 不会
-#      伪造 encryptData/签名, 取不到时脚本按失败上报。
 # ---------------------------------------------------------------------------
-#
-# 参考模版：Template/hsy.py —— 由 YYB-Go 的 /wxapp/getCode 取 wx.login code，
-# 之后全部走红色火箭自己的业务接口（不再依赖 wx_server_url / wx_auth 桥接服务）。
-# 本文件是 wxapp/hongsehuojian.py 的 YYB-Go 版，原桥接版脚本保持不变。
 
 import base64
 import hashlib
@@ -87,6 +90,12 @@ if hasattr(sys.stdout, "reconfigure"):
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
+try:
+    from notify import send
+except Exception:
+    def send(title, content):
+        print(f"\n===== {title} =====\n{content}")
+
 # ---------------------------------------------------------------------------
 # 常量 (均来自反编译源码, 非机密)
 # ---------------------------------------------------------------------------
@@ -95,7 +104,6 @@ BASE_URL = "https://index.amcfortune.com"
 PRO = "RedRocket"
 PLA = "rr_Android"
 AGREEMENT = "阅读并同意用户协议、隐私政策，未注册的手机号认证后自动创建新账户"
-TIMEOUT = 60                                  # YYB 取码 / 业务接口
 
 EP_OPENID = "/fundex-uc/uc/v1/getWxOpenIdAndUnionId"
 EP_LOGIN = "/fundex-uc/uc/v1/login"
@@ -105,19 +113,12 @@ EP_SIGN_RECORD = "/fundex-activity/point/sign/getRecordList"
 EP_SIGN_IN = "/fundex-activity/point/sign/userSignIn"
 EP_TOTAL_POINT = "/fundex-activity/point/account/getTotalPoint"
 
-VERSION = os.getenv("hshj_ver", "1.46.0")
-ALLOW_PHONE_LOGIN = os.getenv("hshj_phone_login", "1").strip().lower() not in ("0", "false", "no")
-
-TOKEN_CACHE_PATH = Path(__file__).with_name("hongsehuojian_token_cache.json")
-
-session = requests.Session()
-
-
+# smallcat / wx_server 配置 (机密, 只从环境变量读取)
 # ---------------------------------------------------------------------------
-# YYB-Go 协议调用
+# YYB-Go：账号与取码（参考 Template/hsy.py）
 # ---------------------------------------------------------------------------
 def routes():
-    # YYB_SERVER 每行：地址@账号标识（与 Template/hsy.py 一致）。
+    # YYB_SERVER 每行：地址@账号标识
     values = []
     for lineno, raw in enumerate(os.getenv("YYB_SERVER", "").splitlines(), 1):
         raw = raw.strip()
@@ -137,77 +138,66 @@ def routes():
     return values
 
 
-def yyb_call(server, ref, path, payload=None, appid=MINI_APP_ID):
-    """调用 YYB-Go 协议接口，返回统一信封里的 data 节点。"""
-    data = {"ref": ref, "app_id": appid}
-    if payload is not None:
-        data["payload"] = payload
+def yyb_code(server, ref):
+    # YYB-Go：POST /wxapp/getCode {"ref": 账号标识, "app_id": 小程序 APPID}。
+    # wx.login code 短期且一次性，失败即抛错，不重放后面的业务请求。
     headers = {"Content-Type": "application/json"}
     api_key = os.getenv("YYB_API_KEY", "").strip()
     if api_key:
         headers["Authorization"] = "Bearer " + api_key
-    response = requests.post(f"{server}{path}", json=data, headers=headers, timeout=TIMEOUT)
+    response = requests.post(
+        f"{server}/wxapp/getCode",
+        json={"ref": ref, "app_id": MINI_APP_ID},
+        headers=headers,
+        timeout=30,
+    )
     response.raise_for_status()
     try:
         body = response.json()
     except ValueError as exc:
-        raise RuntimeError(f"YYB {path} 返回非 JSON：HTTP {response.status_code}") from exc
-    if not isinstance(body, dict):
-        raise RuntimeError(f"YYB {path} 返回格式异常：{body!r}")
+        raise RuntimeError(f"YYB 取 code 返回非 JSON：HTTP {response.status_code}") from exc
     if int(body.get("code", -1)) != 0:
-        raise RuntimeError(f"YYB {path} 失败：{body.get('msg') or body.get('message') or body}")
-    node = body.get("data")
-    return node if isinstance(node, dict) else {}
-
-
-def find_code(node, keys):
-    """在协议响应里递归找一次性 code（YYP 各能力返回层级不完全一致）。"""
-    if isinstance(node, dict):
-        for key in keys:
-            value = node.get(key)
-            if isinstance(value, str) and value and value not in {"invalid", "null"}:
-                return value
-        for value in node.values():
-            found = find_code(value, keys)
-            if found:
-                return found
-    elif isinstance(node, list):
-        for item in node:
-            found = find_code(item, keys)
-            if found:
-                return found
-    return None
-
-
-def get_code(server, ref):
-    """wx.login code（/wxapp/getCode）。code 短期且一次性。"""
-    data = yyb_call(server, ref, "/wxapp/getCode")
-    result = data.get("result")
+        raise RuntimeError(f"YYB 取 code 失败：{body.get('msg') or body.get('message') or body}")
+    result = (body.get("data") or {}).get("result")
     code = result if isinstance(result, str) else (result or {}).get("code")
     if not code:
         raise RuntimeError("YYB 未返回 data.result.code")
     return str(code)
 
 
-def get_phone_code(server, ref):
-    """手机号授权包里的 code（/wxapp/getPhoneNumber）。
-
-    能否返回真实 code 取决于账号与目标小程序；yyb-go 不伪造授权结果。
-    """
-    data = yyb_call(server, ref, "/wxapp/getPhoneNumber")
-    code = find_code(data, ("phone_code", "phoneCode", "wx_code", "login_code", "code"))
+def yyb_phone_code(server, ref):
+    # YYB-Go：POST /wxapp/getPhoneNumber {"ref": 账号标识, "app_id": 小程序 APPID}
+    headers = {"Content-Type": "application/json"}
+    api_key = os.getenv("YYB_API_KEY", "").strip()
+    if api_key:
+        headers["Authorization"] = "Bearer " + api_key
+    response = requests.post(
+        f"{server}/wxapp/getPhoneNumber",
+        json={"ref": ref, "app_id": MINI_APP_ID},
+        headers=headers,
+        timeout=60,
+    )
+    response.raise_for_status()
+    body = response.json()
+    if int(body.get("code", -1)) != 0:
+        raise RuntimeError(f"YYB 取手机号失败：{body.get('msg') or body.get('message') or body}")
+    data = body.get("data") or {}
+    result = data.get("result") or data
+    code = result.get("code") or data.get("code")
     if not code:
-        raise RuntimeError("YYB 未返回手机号 code（该账号可能未获得手机号授权）")
-    return code
+        raise RuntimeError("YYB 未返回手机号 code")
+    return str(code)
 
 
-def get_encrypt_key(server, ref):
-    """getUserEncryptKey 能力（/wx/encryptkey）-> (encryptKey, version)。"""
-    data = yyb_call(server, ref, "/wx/encryptkey", payload={"api_name": "getLatestUserKey"})
-    result = data.get("result") if isinstance(data.get("result"), dict) else data
-    encrypt_key = result.get("encryptKey") or result.get("encrypt_key")
-    version = result.get("version") or result.get("keyVersion") or result.get("key_version")
-    return encrypt_key, version
+def mask(ref):
+    return ref if len(ref) <= 12 else f"{ref[:6]}...{ref[-4:]}"
+
+VERSION = os.getenv("hshj_ver", "1.46.0")
+ALLOW_PHONE_LOGIN = os.getenv("hshj_phone_login", "1").strip().lower() not in ("0", "false", "no")
+
+TOKEN_CACHE_PATH = Path(__file__).with_name("hongsehuojian_token_cache.json")
+
+session = requests.Session()
 
 
 # ---------------------------------------------------------------------------
@@ -272,16 +262,53 @@ def write_token_cache(cache):
             json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8"
         )
     except Exception as e:
-        print(f"[缓存] 写入token缓存失败: {e}")
+        print(f"⚠️ 写入token缓存失败: {e}")
+
+
+# ---------------------------------------------------------------------------
+# smallcat
+# 当前账号的 YYB 服务地址（main 遍历账号时写入；取码需要 服务地址 + 账号标识）
+YYB_SERVER_URL = ""
+
+
+def get_code(account_id, endpoint="/wx/code"):
+    """YYB-Go 取码：/wx/code -> /wxapp/getCode；/wx/getphonenumber -> /wxapp/getPhoneNumber。
+    同账号取码由 YYB 串行处理，不需要再 /wx/refresh。"""
+    if endpoint not in ("/wx/code", "/wx/getphonenumber"):
+        raise RuntimeError(f"YYB-Go 不再支持端点 {endpoint}")
+    last_msg = ""
+    for attempt in range(4):
+        if attempt:
+            time.sleep(3)
+        try:
+            if endpoint == "/wx/code":
+                return yyb_code(YYB_SERVER_URL, account_id)
+            return yyb_phone_code(YYB_SERVER_URL, account_id)
+        except Exception as exc:
+            last_msg = str(exc)
+    raise RuntimeError(f"YYB-Go {endpoint} 失败(已重试): {last_msg}")
+
+
+def get_encrypt_key(account_id):
+    """签名用的 encrypt_key。YYB-Go 的 /wx/getlatestuserkey（getUserEncryptKey 转发）需要小程序真实的
+    operateWxData payload，不能凭空构造，因此这里不做猜测性转发：
+    用 hshj_encrypt_key=encrypt_key#key_version 提供，否则明确报错。"""
+    raw = os.getenv("hshj_encrypt_key", "").strip()
+    if raw:
+        parts = raw.split("#", 1)
+        return parts[0], (parts[1] if len(parts) > 1 else "")
+    raise RuntimeError(
+        "YYB-Go 无法自动获取 encrypt_key（需真实 getLatestUserKey payload）；"
+        "请在 YYB 控制台确认该小程序能力后用 hshj_encrypt_key=encrypt_key#key_version 提供"
+    )
 
 
 # ---------------------------------------------------------------------------
 # 红色火箭 客户端
 # ---------------------------------------------------------------------------
 class RedRocket:
-    def __init__(self, server, ref, index):
-        self.server = server
-        self.ref = ref
+    def __init__(self, account_id, index):
+        self.account_id = account_id
         self.index = index
         self.ticket = ""
         self.user_id = ""
@@ -308,7 +335,7 @@ class RedRocket:
         url = f"{BASE_URL}{path}"
         if method.upper() == "GET":
             data["key"] = int(time.time() * 1000)
-            resp = session.get(url, params=data, headers=headers, timeout=TIMEOUT)
+            resp = session.get(url, params=data, headers=headers, timeout=60)
         else:
             nonce = make_nonce()
             timestamp = str(int(time.time() * 1000))
@@ -324,7 +351,7 @@ class RedRocket:
                 url,
                 data=json.dumps(data, separators=(",", ":"), ensure_ascii=False).encode("utf-8"),
                 headers=headers,
-                timeout=TIMEOUT,
+                timeout=60,
             )
         resp.raise_for_status()
         resp.encoding = "utf-8"
@@ -333,11 +360,11 @@ class RedRocket:
         code = str(result.get("code", ""))
         if code == "7005" and not _retried:
             # 用户加密 key 过期 -> 刷新后重试一次 (vendor.js:6358)
-            self.encrypt_key, self.encrypt_ver = get_encrypt_key(self.server, self.ref)
+            self.encrypt_key, self.encrypt_ver = get_encrypt_key(self.account_id)
             return self.request(path, data, method, _retried=True)
         if code == "7006":
             # 服务端要求重取加密路径清单; 本脚本不走加密体, 仅记录
-            print(f"  [!] 服务端返回 7006(加密清单变更): {result.get('msg') or result.get('message')}")
+            print(f"  ⚠️ 服务端返回 7006(加密清单变更): {result.get('msg') or result.get('message')}")
         if code == "407":
             self.ticket = ""
             self.user_id = ""
@@ -355,14 +382,14 @@ class RedRocket:
 
     # -- 缓存 ------------------------------------------------------------
     def load_cache(self):
-        entry = read_token_cache().get(self.ref) or {}
+        entry = read_token_cache().get(self.account_id) or {}
         self.ticket = entry.get("ticket") or ""
         self.user_id = str(entry.get("userId") or "")
         return bool(self.ticket)
 
     def save_cache(self):
         cache = read_token_cache()
-        cache[self.ref] = {
+        cache[self.account_id] = {
             "ticket": self.ticket,
             "userId": self.user_id,
             "openId": self.openid,
@@ -372,14 +399,14 @@ class RedRocket:
 
     def forget_ticket(self):
         cache = read_token_cache()
-        if self.ref in cache:
-            del cache[self.ref]
+        if self.account_id in cache:
+            del cache[self.account_id]
             write_token_cache(cache)
 
     # -- 登录 ------------------------------------------------------------
     def resolve_openid(self):
-        """wx.login code -> openId / unionId (小程序 store 的 openid, 非 YYB 账号标识)。"""
-        code = get_code(self.server, self.ref)
+        """wx.login code -> openId / unionId (小程序 store 的 openid, 非 wx_server 的 openid)。"""
+        code = get_code(self.account_id)
         result = self.request(EP_OPENID, {"code": code})
         if not self.ok(result):
             raise RuntimeError(f"获取 openId 失败: {self.err(result)}")
@@ -411,8 +438,8 @@ class RedRocket:
         return True
 
     def login_by_phone(self):
-        """唯一发 ticket 的入口, 需微信手机号能力的 code (用户已明确授权)。"""
-        phone_code = get_phone_code(self.server, self.ref)
+        """唯一发 ticket 的入口, 需 wx.getPhoneNumber 的 code (用户已明确授权)。"""
+        phone_code = get_code(self.account_id, "/wx/getphonenumber")
         body = {
             "loginWay": "miniprogram",
             "platform": "mini_fundex",
@@ -532,76 +559,91 @@ def ensure_ticket(client, manual_ticket):
     return True
 
 
-def notify(lines):
-    if os.getenv("HSHJ_NOTIFY", "1").lower() in {"0", "false", "no"}:
-        return
-    for path in (os.path.dirname(os.path.abspath(__file__)), "/ql/data/scripts", "/ql/scripts"):
-        if path not in sys.path:
-            sys.path.insert(0, path)
-    try:
-        from notify import send
-        send("红色火箭签到", "\n".join(lines))
-    except Exception as exc:
-        print(f"[通知] 发送失败（不影响任务）：{exc}")
+def run_account(account_id, index, server):
+    global YYB_SERVER_URL
+    YYB_SERVER_URL = server
+    lines = [f"【账号 {index}】"]
+    client = RedRocket(account_id, index)
 
+    client.encrypt_key, client.encrypt_ver = get_encrypt_key(account_id)
+    if not client.encrypt_key:
+        raise RuntimeError("wx_server 未返回 encrypt_key, 无法签名")
+    client.resolve_openid()
 
-def run_one(index, server, ref):
-    result = [f"账号 {index}（YYB {mask(ref)}）"]
-    try:
-        client = RedRocket(server, ref, index)
+    manual = MANUAL_TICKETS[index - 1] if index - 1 < len(MANUAL_TICKETS) else ""
+    ensure_ticket(client, manual)
 
-        client.encrypt_key, client.encrypt_ver = get_encrypt_key(server, ref)
-        if not client.encrypt_key:
-            result.append("失败：YYB 未返回 encryptKey（/wx/encryptkey 需要该账号在目标小程序侧可用），无法签名")
-            return result
-        client.resolve_openid()
+    state = client.get_sign_days()
+    signed, days, today_point = RedRocket.parse_sign_state(state)
+    print(f"账号 {index} 签到状态: 今日已签={signed} 连续天数={days} 今日可得={today_point}")
 
-        manual = MANUAL_TICKETS[index - 1] if index - 1 < len(MANUAL_TICKETS) else ""
-        ensure_ticket(client, manual)
-
-        state = client.get_sign_days()
-        signed, days, today_point = RedRocket.parse_sign_state(state)
-
-        if signed is True:
-            # 幂等优先: 已签则不再提交, 但仍汇报积分余额
-            result.append(f"今日已签到{f'，连续 {days} 天' if days is not None else ''}")
+    if signed is True:
+        # 幂等优先: 已签则不再提交, 但仍汇报积分余额
+        msg = f"今日已签到{f', 连续 {days} 天' if days is not None else ''}"
+        print(f"✅ 账号 {index} {msg}")
+        lines.append(f"✅ {msg}")
+        succeeded = True
+    else:
+        ok, result = client.sign_in()
+        if ok:
+            msg = "签到成功"
+            data = result.get("data")
+            gained = None
+            if isinstance(data, dict):
+                gained = data.get("point") or data.get("points") or data.get("addPoint")
+            gained = gained or today_point
+            if gained:
+                msg += f", +{gained} 积分"
+            print(f"🎉 账号 {index} {msg}")
+            lines.append(f"🎉 {msg}")
+            succeeded = True
         else:
-            ok, body = client.sign_in()
-            if ok:
-                data = body.get("data")
-                gained = None
-                if isinstance(data, dict):
-                    gained = data.get("point") or data.get("points") or data.get("addPoint")
-                gained = gained or today_point
-                result.append(f"签到成功，+{gained} 积分" if gained else "签到成功")
+            detail = RedRocket.err(result)
+            if any(k in detail for k in ("已签", "重复", "已参与", "已领取")):
+                print(f"✅ 账号 {index} 今日已签到 ({detail})")
+                lines.append("✅ 今日已签到")
+                succeeded = True
             else:
-                detail = RedRocket.err(body)
-                if any(k in detail for k in ("已签", "重复", "已参与", "已领取")):
-                    result.append("今日已签到")
-                else:
-                    result.append(f"失败：签到失败: {detail}")
-                    return result
+                print(f"❌ 账号 {index} 签到失败: {detail}")
+                lines.append(f"❌ 签到失败: {detail}")
+                succeeded = False
 
-        point = client.total_point()
-        if point is not None:
-            result.append(f"当前积分: {point}")
-    except Exception as exc:
-        result.append(f"失败：{exc}")
-    print("\n".join(result))
-    return result
+    point = client.total_point()
+    if point is not None:
+        print(f"账号 {index} 当前积分: {point}")
+        lines.append(f"当前积分: {point}")
+    return "\n".join(lines), succeeded
 
 
 def main():
     try:
-        sys.stdout.reconfigure(encoding="utf-8")
-    except AttributeError:
-        pass
+        route_list = routes()
+    except RuntimeError as exc:
+        print(f"❌ {exc}")
+        return
 
-    output = ["红色火箭：积分中心每日签到"]
-    for index, (server, ref) in enumerate(routes(), 1):
-        output.extend(run_one(index, server, ref))
+    print("=============== 红色火箭 签到开始 ===============")
+    summaries = []
+    ok_count = 0
+    for i, (server, ref) in enumerate(route_list, 1):
+        parts = str(ref).split("#", 1)
+        account = parts[0].strip()
+        remark = parts[1].strip() if len(parts) > 1 else ""
+        print(f"\n-------------- 账号 {i}{('/' + remark) if remark else ''} --------------")
+        try:
+            summary, ok = run_account(account, i, server)
+            summaries.append(summary)
+            ok_count += 1 if ok else 0
+        except Exception as e:
+            print(f"❌ 账号 {i} 执行异常: {e}")
+            summaries.append(f"【账号 {i}】\n❌ 执行异常: {e}")
         time.sleep(1)
-    notify(output)
+
+    print("\n=============== 红色火箭 签到结束 ===============")
+    try:
+        send(f"红色火箭签到 {ok_count}/{len(accounts)} 成功", "\n\n".join(summaries))
+    except Exception as e:
+        print(f"⚠️ 通知发送失败: {e}")
 
 
 MANUAL_TICKETS = [

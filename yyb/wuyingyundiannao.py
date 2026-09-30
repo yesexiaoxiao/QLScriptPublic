@@ -1,22 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+# 无影云电脑 - 每日签到得灵豆
+# 入口: 微信小程序「无影云电脑」-> 我的 -> 签到  (灵豆可用于续费云电脑时长)
 # name: 无影云电脑签到
 # cron: 40 9 * * *
 #
 # 环境变量：
-#   YYB_SERVER          每行：地址@账号标识（例如 http://yyb-go:8000@1）
-#   YYB_API_KEY         可选；yyb-go 配置 YYB_PROTOCOL_TOKEN 时填同一令牌
-#   wuying_token        可选逃生口：静默登录被阿里云安全验证拦下时填写
-#                       「LoginToken#SessionId」，多账号按账号顺序换行或 & 分割
-#   WUYING_NOTIFY       0 关闭青龙通知；默认 1
-#
-# 入口: 微信小程序「无影云电脑」-> 我的 -> 签到  (灵豆可用于续费云电脑时长)
-# 前置条件: 该小程序登录依赖「已绑定手机号的阿里云账号」。若当前微信身份尚未
-#       绑定阿里云账号(authLogin 返回 state=register), 需先在小程序内完成
-#       手机号/阿里云账号授权注册, 脚本会如实识别并上报, 不自动触发注册。
+#   YYB_SERVER    每行：地址@账号标识（例如 http://yyb-go:8000@1）
+#   YYB_API_KEY   可选；yyb-go 配置 YYB_PROTOCOL_TOKEN 时填同一令牌
 #
 # 参考模版：Template/hsy.py —— 由 YYB-Go 的 /wxapp/getCode 取 wx.login code，
-# 之后全部走无影自己的业务接口（不再依赖 wx_server_url / wx_auth 桥接服务）。
+# 之后全部走小程序自己的业务接口（不再依赖 wx_server_url / wx_auth 桥接服务）。
 # 本文件是 wxapp/wuyingyundiannao.py 的 YYB-Go 版，原桥接版脚本保持不变。
 
 import json
@@ -33,6 +27,12 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
+try:
+    from notify import send
+except Exception:
+    def send(title, content):
+        print(f"\n===== {title} =====\n{content}")
 
 # ---------------------------------------------------------------------------
 # 常量 (均来自小程序反编译源码, 非机密)
@@ -52,28 +52,13 @@ FROM_CLIENT = "miniapp_weixin"
 BIZ_OK = "success"
 # 会话失效 -> 需重新登录
 SESSION_INVALID = ("User.LoginInvalid", "InvalidLoginToken.Missing", "NOT_LOGIN")
-TIMEOUT = 30                                  # YYB 取码 / 业务接口
 
-TOKEN_CACHE_PATH = Path(__file__).with_name("wuyingyundiannao_token_cache.json")
-# 手动会话逃生口: wuying_token = "LoginToken#SessionId", 按账号顺序换行/& 分割
-MANUAL_SESSIONS = [x.strip() for x in
-                   os.getenv("wuying_token", "").replace("&", "\n").splitlines()
-                   if x.strip()]
-DEFAULT_UA = (
-    "Mozilla/5.0 (Linux; Android 13; SM-G9910 Build/TP1A.220624.014) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Mobile Safari/537.36 "
-    "MicroMessenger/8.0.49.2600(0x28003137) NetType/WIFI Language/zh_CN "
-    "miniProgram/" + MINI_APP_ID
-)
-
-session = requests.Session()
-
-
+# smallcat / wx_server 配置 (机密, 从环境变量读取, 绝不硬编码)
 # ---------------------------------------------------------------------------
-# YYB-Go: 账号 -> wx.login code
+# YYB-Go：账号与取码（参考 Template/hsy.py）
 # ---------------------------------------------------------------------------
 def routes():
-    # YYB_SERVER 每行：地址@账号标识（与 Template/hsy.py 一致）。
+    # YYB_SERVER 每行：地址@账号标识
     values = []
     for lineno, raw in enumerate(os.getenv("YYB_SERVER", "").splitlines(), 1):
         raw = raw.strip()
@@ -95,7 +80,7 @@ def routes():
 
 def yyb_code(server, ref):
     # YYB-Go：POST /wxapp/getCode {"ref": 账号标识, "app_id": 小程序 APPID}。
-    # 同账号取码由 YYB-Go 串行化；code 短期且一次性，失败即抛错。
+    # wx.login code 短期且一次性，失败即抛错，不重放后面的业务请求。
     headers = {"Content-Type": "application/json"}
     api_key = os.getenv("YYB_API_KEY", "").strip()
     if api_key:
@@ -104,7 +89,7 @@ def yyb_code(server, ref):
         f"{server}/wxapp/getCode",
         json={"ref": ref, "app_id": MINI_APP_ID},
         headers=headers,
-        timeout=TIMEOUT,
+        timeout=30,
     )
     response.raise_for_status()
     try:
@@ -118,6 +103,25 @@ def yyb_code(server, ref):
     if not code:
         raise RuntimeError("YYB 未返回 data.result.code")
     return str(code)
+
+
+def mask(ref):
+    return ref if len(ref) <= 12 else f"{ref[:6]}...{ref[-4:]}"
+
+
+TOKEN_CACHE_PATH = Path(__file__).with_name("wuyingyundiannao_token_cache.json")
+# 手动会话逃生口: wuying_token = "LoginToken#SessionId", 按账号顺序换行/& 分割
+MANUAL_SESSIONS = [x.strip() for x in
+                   os.getenv("wuying_token", "").replace("&", "\n").splitlines()
+                   if x.strip()]
+DEFAULT_UA = (
+    "Mozilla/5.0 (Linux; Android 13; SM-G9910 Build/TP1A.220624.014) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Mobile Safari/537.36 "
+    "MicroMessenger/8.0.49.2600(0x28003137) NetType/WIFI Language/zh_CN "
+    "miniProgram/" + MINI_APP_ID
+)
+
+session = requests.Session()
 
 
 # ---------------------------------------------------------------------------
@@ -146,29 +150,46 @@ def write_token_cache(cache):
         TOKEN_CACHE_PATH.write_text(
             json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception as e:
-        print(f"[缓存] 写入token缓存失败: {e}")
+        print(f"⚠️ 写入token缓存失败: {e}")
 
 
-def get_cached_session(ref):
-    return read_token_cache().get(ref) or {}
+def get_cached_session(openid):
+    return read_token_cache().get(openid) or {}
 
 
-def save_cached_session(ref, login_token, session_id):
+def save_cached_session(openid, login_token, session_id):
     cache = read_token_cache()
-    cache[ref] = {"LoginToken": login_token, "SessionId": session_id,
-                  "updatedAt": int(time.time())}
+    cache[openid] = {"LoginToken": login_token, "SessionId": session_id,
+                     "updatedAt": int(time.time())}
     write_token_cache(cache)
 
 
-def remove_cached_session(ref):
+def remove_cached_session(openid):
     cache = read_token_cache()
-    if ref in cache:
-        del cache[ref]
+    if openid in cache:
+        del cache[openid]
         write_token_cache(cache)
 
 
 # ---------------------------------------------------------------------------
-# 阿里云账号 OAuth: wx.login code -> st (复刻 authLogin.html 静默登录)
+# smallcat: openid -> wx.login code
+# ---------------------------------------------------------------------------
+# 当前账号的 YYB 服务地址（main 遍历账号时通过 run_account 写入；取码需要 服务地址 + 账号标识）
+YYB_SERVER_URL = ""
+
+
+# YYB-Go: 账号标识 -> wx.login code（同账号取码由 YYB 串行处理，不需要再 /wx/refresh）
+def get_wx_code(openid):
+    last_msg = ""
+    for attempt in range(4):
+        if attempt:
+            time.sleep(3)
+        try:
+            return yyb_code(YYB_SERVER_URL, openid)
+        except Exception as exc:
+            last_msg = str(exc)
+    raise RuntimeError(f"YYB-Go 获取 code 失败(已重试): {last_msg}")
+
 # ---------------------------------------------------------------------------
 def aliyun_authlogin(code):
     """POST {OAUTH_BASE}/weixin/authLogin.html?code=..&appId=.. -> 响应 data。
@@ -184,7 +205,7 @@ def aliyun_authlogin(code):
         headers={"content-type": "application/x-www-form-urlencoded",
                  "User-Agent": DEFAULT_UA,
                  "Referer": f"https://servicewechat.com/{MINI_APP_ID}/0/page-frame.html"},
-        timeout=TIMEOUT,
+        timeout=30,
     )
     resp.raise_for_status()
     body = resp.json()
@@ -212,9 +233,9 @@ def _open_api(endpoint, action, version, params, method="GET"):
                "Referer": f"https://servicewechat.com/{MINI_APP_ID}/0/page-frame.html"}
     url = f"{endpoint}?{urllib.parse.urlencode(sorted(q.items()))}"
     if method.upper() == "POST":
-        resp = session.post(url, data={}, headers=headers, timeout=TIMEOUT)
+        resp = session.post(url, data={}, headers=headers, timeout=30)
     else:
-        resp = session.get(url, headers=headers, timeout=TIMEOUT)
+        resp = session.get(url, headers=headers, timeout=30)
     resp.raise_for_status()
     return resp.json()
 
@@ -355,8 +376,8 @@ def attend_activity(lt, sid, activity_id):
 # ---------------------------------------------------------------------------
 # 会话获取: 缓存(刷新) -> 静默登录
 # ---------------------------------------------------------------------------
-def obtain_session(server, ref, index, force=False):
-    """返回 (login_token, session_id, state, note)。
+def obtain_session(openid, index, force=False):
+    """返回 (login_token, session_id, state)。
     state 为 'ok' 表示已登录; 其余为前置条件说明字符串。force=True 跳过缓存强制重登。"""
     # 0) 手动会话(逃生口): 静默登录被阿里云风控拦下时, 用户可自行从小程序里取到
     #    LoginToken/SessionId 填进 wuying_token, 脚本用 RefreshLoginToken 续期。
@@ -367,39 +388,42 @@ def obtain_session(server, ref, index, force=False):
             refreshed = refresh_login_token(parts[0], parts[1])
             if refreshed:
                 lt, sid = refreshed
-                save_cached_session(ref, lt, sid)
-                return lt, sid, "ok", f"使用手动会话(已刷新)：{mask(lt)}"
+                save_cached_session(openid, lt, sid)
+                print(f"账号 {index} 使用手动会话(已刷新): {mask(lt)}")
+                return lt, sid, "ok"
             print(f"账号 {index} wuying_token 已失效, 回退到静默登录")
         else:
             print(f"账号 {index} wuying_token 格式应为 LoginToken#SessionId, 已忽略")
 
     # 1) 复用缓存并尝试刷新
     if force:
-        remove_cached_session(ref)
+        remove_cached_session(openid)
     else:
-        cached = get_cached_session(ref)
+        cached = get_cached_session(openid)
         if cached.get("LoginToken") and cached.get("SessionId"):
             refreshed = refresh_login_token(cached["LoginToken"], cached["SessionId"])
             if refreshed:
                 lt, sid = refreshed
-                save_cached_session(ref, lt, sid)
-                return lt, sid, "ok", f"使用缓存会话(已刷新)：{mask(lt)}"
-            remove_cached_session(ref)
+                save_cached_session(openid, lt, sid)
+                print(f"账号 {index} 使用缓存会话(已刷新): {mask(lt)}")
+                return lt, sid, "ok"
+            remove_cached_session(openid)
 
     # 2) 静默登录 (wx.login code -> authLogin)
-    code = yyb_code(server, ref)
+    code = get_wx_code(openid)
     node = aliyun_authlogin(code)
     state = node.get("state")
     st = node.get("st")
     if state == "loginSuccess" and st:
         lt, sid = get_login_token(st)
-        save_cached_session(ref, lt, sid)
-        return lt, sid, "ok", f"静默登录成功：{mask(lt)}"
+        save_cached_session(openid, lt, sid)
+        print(f"账号 {index} 静默登录成功: {mask(lt)}")
+        return lt, sid, "ok"
 
     # 3) 各类前置条件 (不自动触发注册/实名/手机号授权)
     if state in ("register", "NeedOAuth", None):
         return None, None, ("该微信身份尚未绑定阿里云账号, 需先在小程序「无影云电脑→我的→"
-                            "签到/登录」完成手机号授权并绑定阿里云账号后才能签到"), ""
+                            "签到/登录」完成手机号授权并绑定阿里云账号后才能签到")
     if state in ("identityVerify", "IV"):
         # 注意: 这不是「实名认证」——已实名的账号同样会收到。阿里云对本次静默登录
         # 下发了一次性「安全验证/身份核验」挑战: authLogin 只回 ivToken 不回 st,
@@ -412,78 +436,85 @@ def obtain_session(server, ref, index, force=False):
                             "脚本不会代过风控验证。两种解法: ① 在小程序「无影云电脑」"
                             "内登录一次并按提示完成安全验证, 让阿里云信任该登录环境; "
                             "② 从小程序里取到 LoginToken 与 SessionId, 填入变量 "
-                            "wuying_token(格式 LoginToken#SessionId), 脚本会自动续期。"), ""
-    return None, None, f"登录状态异常(state={state}), 请在小程序内手动登录一次后重试", ""
+                            "wuying_token(格式 LoginToken#SessionId), 脚本会自动续期。")
+    return None, None, f"登录状态异常(state={state}), 请在小程序内手动登录一次后重试"
 
 
 # ---------------------------------------------------------------------------
 # 主流程 (每账号一次幂等签到)
 # ---------------------------------------------------------------------------
-def notify(lines):
-    if os.getenv("WUYING_NOTIFY", "1").lower() in {"0", "false", "no"}:
-        return
-    for path in (os.path.dirname(os.path.abspath(__file__)), "/ql/data/scripts", "/ql/scripts"):
-        if path not in sys.path:
-            sys.path.insert(0, path)
-    try:
-        from notify import send
-        send("无影云电脑签到", "\n".join(lines))
-    except Exception as exc:
-        print(f"[通知] 发送失败（不影响任务）：{exc}")
+def run_account(openid, index, server):
+    global YYB_SERVER_URL
+    YYB_SERVER_URL = server
+    lines = [f"【账号 {index}】"]
 
+    lt, sid, state = obtain_session(openid, index)
+    if state != "ok":
+        print(f"⚠️ 账号 {index} {state}")
+        lines.append(f"⚠️ {state}")
+        return "\n".join(lines), False
 
-def run_one(index, server, ref):
-    result = [f"账号 {index}（YYB {mask(ref)}）"]
-    try:
-        lt, sid, state, note = obtain_session(server, ref, index)
-        if note:
-            result.append(note)
+    # 定位签到活动 (签到页在分包内为空壳, ActivityId 需运行时从活动列表发现)
+    activity_id, act, session_bad = find_signin_activity_id(lt, sid)
+    if session_bad:                       # 会话失效 -> 强制重登重试一次
+        print(f"账号 {index} 会话失效, 重新登录...")
+        lt, sid, state = obtain_session(openid, index, force=True)
         if state != "ok":
-            result.append(state)
-            return result
-
-        # 定位签到活动 (签到页在分包内为空壳, ActivityId 需运行时从活动列表发现)
+            print(f"⚠️ 账号 {index} {state}")
+            lines.append(f"⚠️ {state}")
+            return "\n".join(lines), False
         activity_id, act, session_bad = find_signin_activity_id(lt, sid)
-        if session_bad:                       # 会话失效 -> 强制重登重试一次
-            result.append("会话失效，重新登录")
-            lt, sid, state, note = obtain_session(server, ref, index, force=True)
-            if note:
-                result.append(note)
-            if state != "ok":
-                result.append(state)
-                return result
-            activity_id, act, session_bad = find_signin_activity_id(lt, sid)
-        if not activity_id:
-            result.append("未能在活动列表里定位到「每日签到」活动 (可能活动未上线, "
-                          "或需在小程序内进入签到页抓取 ActivityId)")
-            return result
-        result.append(f"签到活动 ActivityId={activity_id}")
+    if not activity_id:
+        msg = ("未能定位「每日签到」活动 (活动列表中无签到活动, 可能活动未上线, "
+               "或需在小程序内进入签到页抓取 ActivityId)")
+        print(f"⚠️ 账号 {index} {msg}")
+        lines.append(f"⚠️ {msg}")
+        return "\n".join(lines), False
+    print(f"账号 {index} 定位到签到活动 ActivityId={activity_id}")
 
-        # 幂等信号 (best-effort): 参与次数
-        cnt = attendance_count(lt, sid, activity_id)
-        if isinstance(cnt, dict) and cnt.get("Count") is not None:
-            result.append(f"当前参与次数: {cnt.get('Count')}")
+    # 幂等信号 (best-effort): 参与次数
+    cnt = attendance_count(lt, sid, activity_id)
+    if isinstance(cnt, dict) and cnt.get("Count") is not None:
+        print(f"账号 {index} 当前参与次数: {cnt.get('Count')}")
 
-        # 执行一次签到
-        ok, msg = attend_activity(lt, sid, activity_id)
-        result.append(msg if ok else f"失败：{msg}")
-    except Exception as exc:
-        result.append(f"失败：{exc}")
-    print("\n".join(result))
-    return result
+    # 执行一次签到
+    ok, msg = attend_activity(lt, sid, activity_id)
+    if ok:
+        print(f"🎉 账号 {index} {msg}")
+        lines.append(f"🎉 {msg}")
+        return "\n".join(lines), True
+    print(f"❌ 账号 {index} {msg}")
+    lines.append(f"❌ {msg}")
+    return "\n".join(lines), False
 
 
 def main():
     try:
-        sys.stdout.reconfigure(encoding="utf-8")
-    except AttributeError:
-        pass
+        route_list = routes()
+    except RuntimeError as exc:
+        print(f"❌ {exc}")
+        return
 
-    output = ["无影云电脑：每日签到得灵豆"]
-    for index, (server, ref) in enumerate(routes(), 1):
-        output.extend(run_one(index, server, ref))
+    print("=============== 无影云电脑 签到开始 ===============")
+    summaries = []
+    ok_count = 0
+    for i, (server, ref) in enumerate(route_list, 1):
+        print(f"\n-------------- 账号 {i}({mask(ref)}) --------------")
+        try:
+            summary, ok = run_account(ref, i, server)
+            summaries.append(summary)
+            ok_count += 1 if ok else 0
+        except Exception as e:
+            print(f"❌ 账号 {i} 执行异常: {e}")
+            summaries.append(f"【账号 {i}】\n❌ 执行异常: {e}")
         time.sleep(1)
-    notify(output)
+
+    print("\n=============== 无影云电脑 签到结束 ===============")
+    title = f"无影云电脑签到 {ok_count}/{len(route_list)} 成功"
+    try:
+        send(title, "\n\n".join(summaries))
+    except Exception as e:
+        print(f"⚠️ 通知发送失败: {e}")
 
 
 if __name__ == "__main__":

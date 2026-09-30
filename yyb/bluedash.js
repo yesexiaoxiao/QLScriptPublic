@@ -6,11 +6,10 @@
 @Description: BLUE DASH 布鲁大师小程序签到
 cron: 30 8 * * *
 ------------------------------------------
-YYB-Go 版：取码改走 YYB-Go（POST /wxapp/getCode），不再依赖 wx_server_url / wx_auth。
-变量：YYB_SERVER    每行 地址@账号标识，例如 http://yyb-go:8000@1
-      YYB_API_KEY   可选；yyb-go 配置 YYB_PROTOCOL_TOKEN 时填同一令牌
-原桥接版脚本见 wxapp/bluedash.js，业务接口、签到流程与 token 缓存格式均未改动。
 ------------------------------------------
+ YYB-Go 版：取码改走 YYB-Go（POST /wxapp/getCode），不再依赖原取码桥接服务。
+ 变量：YYB_SERVER 每行 地址@账号标识（例如 http://yyb-go:8000@1）；YYB_API_KEY 可选。
+ 原桥接版脚本见 wxapp/bluedash.js，业务接口、流程与缓存格式均未改动。
 */
 
 const { Env } = require("../tools/env.js");
@@ -18,7 +17,7 @@ const $ = new Env("BLUE DASH 布鲁大师签到");
 const axios = require("axios");
 const fs = require("fs");
 const path = require("path");
-const { YYBClient, yybRoutes } = require("./yyb.js");
+const { YYBClient, yybAccounts } = require("./yyb.js");
 
 const MINI_APP_ID = "wx73555499305578f8";
 const API_BASE = "https://wxsc.blue-dash.com/prod-api";
@@ -26,6 +25,7 @@ const LOGIN_TYPE = "34";
 const LOGIN_STATE = "blue_dash";
 const TOKEN_CACHE_FILE = path.join(__dirname, "bluedash_token_cache.json");
 const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) MicroMessenger/3.9.12 MiniProgramEnv/Windows WindowsWechat/WMPF";
+
 
 const yyb = new YYBClient({ appid: MINI_APP_ID });
 
@@ -51,11 +51,9 @@ function maskPhone(phone = "") {
 }
 
 class Task {
-    constructor(route) {
+    constructor(openid) {
         this.index = $.userIdx++;
-        // YYB_SERVER 里「地址@账号标识」的账号标识（账号数字 ID 或 openid），同时作为缓存键
-        this.route = route;
-        this.openid = String(route.ref || "").trim();
+        this.openid = String(openid || "").trim();
         this.authorization = "";
         this.refreshToken = "";
         this.user = {};
@@ -150,7 +148,7 @@ class Task {
         return result.data;
     }
 
-    /** 取 wx.login code：YYB-Go 一个账号一次请求，失败直接抛错（不再有 wx_server 的 status:false 陷阱） */
+    /** 取 wx.login code：YYB-Go /wxapp/getCode（一个账号一次请求，失败即抛错） */
     async getLoginCode() {
         return yyb.getCode(this.openid);
     }
@@ -236,16 +234,11 @@ class Task {
 }
 
 !(async () => {
-    let routes;
-    try {
-        routes = yybRoutes();
-    } catch (e) {
-        $.log(`❌ ${e.message || e}`);
-        return;
-    }
-    $.log(`共找到${routes.length}个YYB账号`);
-    for (const route of routes) {
-        await new Task(route).run();
+    let accounts;
+    try { accounts = yybAccounts(); } catch (e) { $.log(`❌ ${e.message || e}`); return; }
+    $.log(`共找到${accounts.length}个YYB账号`);
+    for (const openid of accounts) {
+        await new Task(openid).run();
     }
 })()
     .catch((e) => $.log(e.message || e))

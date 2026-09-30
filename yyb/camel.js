@@ -34,7 +34,7 @@ const $ = new Env("骆驼CAMEL签到");
 const axios = require("axios");
 const fs = require("fs");
 const path = require("path");
-const { YYBClient, yybRoutes } = require("./yyb.js");
+const { YYBClient, yybAccounts } = require("./yyb.js");
 
 const MINI_APP_ID = "wxa82836302320ca29";
 const CLIENT_BIZ = "weapp_wsc";
@@ -70,6 +70,11 @@ function writeTokenCache(cache) {
     } catch (e) {
         $.log(`写入token缓存失败: ${e.message || e}`);
     }
+}
+
+function parseAccount(raw = "") {
+    const [id, remark] = String(raw).split("#").map((s) => (s || "").trim());
+    return { openid: id, remark: remark || "" };
 }
 
 function maskPhone(phone = "") {
@@ -109,12 +114,11 @@ async function getWxCode(ref) {
 }
 
 class Task {
-    constructor(route) {
+    constructor(raw) {
         this.index = $.userIdx++;
         // YYB_SERVER 里「地址@账号标识」的账号标识（账号数字 ID 或 openid），同时作为 token 缓存键
-        this.route = route;
-        this.ref = String(route.ref || "").trim();
-        this.openid = this.ref;
+        this.account = parseAccount(raw);
+        this.openid = this.account.openid;
         this.token = "";
         this.sessionId = "";
         this.cookie = "";
@@ -126,12 +130,12 @@ class Task {
     }
 
     log(text) {
-        $.log(`账号[${this.index}] ${text}`);
+        $.log(`账号[${this.index}]${this.account.remark ? `[${this.account.remark}]` : ""} ${text}`);
     }
 
     async run() {
         if (!this.openid) {
-            this.log("跳过：YYB 账号标识为空");
+            this.log("跳过：变量值里没有 openid");
             return;
         }
 
@@ -341,17 +345,17 @@ class Task {
 }
 
 !(async () => {
-    let routes;
+    let accounts;
     try {
-        routes = yybRoutes();
+        accounts = yybAccounts();
     } catch (e) {
         $.log(`❌ ${e.message || e}`);
         return;
     }
-    $.log(`共找到${routes.length}个YYB账号`);
-    for (let i = 0; i < routes.length; i++) {
-        await new Task(routes[i]).run();
-        if (i < routes.length - 1) await $.wait(1500, 3000);
+    $.log(`共找到${accounts.length}个YYB账号`);
+    for (let i = 0; i < accounts.length; i++) {
+        await new Task(accounts[i]).run();
+        if (i < accounts.length - 1) await $.wait(1500, 3000);
     }
 })()
     .catch((e) => $.log(e.message || e))
