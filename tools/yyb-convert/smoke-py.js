@@ -90,6 +90,7 @@ sys.modules["urllib3"] = urllib3
 
 os.environ["YYB_SERVER"] = "http://yyb-go.stub:8000@1\\nhttp://yyb-go.stub:8000@2"
 os.environ.pop("YYB_API_KEY", None)
+os.environ["YYB_CODE_DELAY_MS"] = "0"  # 取码前的固定延时会拖垮离线冒烟，这里关掉
 for pair in (EXTRA_ENV or "").split(","):
     if "=" in pair:
         k, v = pair.split("=", 1)

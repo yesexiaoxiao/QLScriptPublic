@@ -10,6 +10,12 @@
 | --- | --- |
 | `YYB_SERVER` | 每行一个账号：`地址@账号标识`，例如 `http://yyb-go:8000@1`（账号标识支持 YYB 的账号 ID 或 OpenID） |
 | `YYB_API_KEY` | 可选；yyb-go 配置了 `YYB_PROTOCOL_TOKEN` 时填同一令牌（会以 `Authorization: Bearer` 发送） |
+| `YYB_CODE_DELAY_MS` | 可选；每次取码（调 `wx.login`）前的延时基准毫秒数，实际等待该基准的 0.75~1.5 倍随机（默认 `60000` → 等 45~90 秒），设 `0` 关闭 |
+
+所有脚本（js 与 py）调用 YYB-Go 取码（`POST /wxapp/getCode`，即 `wx.login`）前都会先等
+`YYB_CODE_DELAY_MS` 的 0.75~1.5 倍随机（默认 45~90 秒）。这里带随机抖动是必要的：多个脚本常由同一
+cron 波次拉起，固定时长会让它们在同一秒对同一账号取码；重试/重新登录会再取一次码，也就再等一次。
+因此 `ykb_all.js`、`jingjianx_all.js` 这类一次遍历多门店的脚本运行时长会明显变长。
 
 部分脚本需要业务参数，账号写成一行的形式：`地址@账号标识#appid#storeId#...`（保留在小程序里抓到的参数，取码仍只用前面那一段账号标识）。
 

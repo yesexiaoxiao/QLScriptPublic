@@ -12,6 +12,8 @@
                  http://yyb-go:8000@oX1y2z...    （ref 支持账号数字 ID 或 OpenID）
    YYB_API_KEY   可选；yyb-go 配置了 YYB_PROTOCOL_TOKEN 时填同一令牌
    YYB_TIMEOUT   可选；单次请求超时毫秒数，默认 30000
+   YYB_CODE_DELAY_MS  可选；每次取码（调 wx.login）前的延时基准毫秒数，实际等待
+                      该基准的 0.75~1.5 倍随机（默认 60000 → 等 45~90 秒），设 0 关闭
 
  接口（YYB-Go Enhanced，见 docs/protocol-api.md）：
    POST {server}/wxapp/getCode        {"ref","app_id"} -> data.result.code
@@ -23,6 +25,7 @@
 
  约定：
    · 同一个账号的取码由 YYB-Go 串行化，脚本侧不需要再手动 /wx/refresh。
+   · 每次取码前先等 YYB_CODE_DELAY_MS 的 0.75~1.5 倍随机（默认 45~90 秒），避免密集取码。
    · wx.login code 短期且一次性，一次调用只取一个 code，失败即抛错（不重放业务请求）。
    · 统一响应信封 {code:0,msg,data}；code!=0 或 HTTP!=200 都按失败处理。
 ------------------------------------------
@@ -31,6 +34,20 @@
 const axios = require("axios");
 
 const REQUEST_TIMEOUT = Number(process.env.YYB_TIMEOUT || 0) || 30000;
+// 取码前延时：基准 YYB_CODE_DELAY_MS（默认 1 分钟），实际等基准的 0.75~1.5 倍随机（默认 45~90 秒）。
+// 抖动是必要的：多个脚本常被同一波次拉起，固定延时会让它们在同一秒向同一账号取码；设 0 关闭。
+const CODE_DELAY_BASE_MS = Number(process.env.YYB_CODE_DELAY_MS || 60000);
+const CODE_DELAY_MIN_RATIO = 0.75;
+const CODE_DELAY_MAX_RATIO = 1.5;
+
+/** 调 wx.login 取码前的延时（基准 + 随机抖动）；实际等待时长打进日志，免得看起来像卡死 */
+async function waitBeforeGetCode() {
+    if (!(CODE_DELAY_BASE_MS > 0)) return;
+    const ratio = CODE_DELAY_MIN_RATIO + Math.random() * (CODE_DELAY_MAX_RATIO - CODE_DELAY_MIN_RATIO);
+    const ms = Math.round(CODE_DELAY_BASE_MS * ratio);
+    console.log(`⏳ 取码前等待 ${(ms / 1000).toFixed(1)} 秒（调用 wx.login 前延时 + 随机抖动）`);
+    await new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 function short(value, max = 200) {
     if (value === undefined || value === null) return "";
@@ -139,6 +156,7 @@ class YYBClient {
 
     /** 取 wx.login code，返回 code 字符串；失败直接抛错 */
     async getCode(ref, appid) {
+        await waitBeforeGetCode();
         const route = this.routeOf(ref);
         const body = await this.call(route, "POST", "/wxapp/getCode", {
             ref: route.ref,

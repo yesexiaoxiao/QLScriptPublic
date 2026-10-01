@@ -94,6 +94,7 @@ function run(file, ctx) {
                     ...process.env,
                     NODE_PATH: ctx.modules,
                     STUB_MODE: LOOSE ? "loose" : "strict",
+                    YYB_CODE_DELAY_MS: "0", // 取码前的固定延时会拖垮离线冒烟，这里关掉
                     YYB_SERVER: "http://yyb-go.stub:8000@1\nhttp://yyb-go.stub:8000@2",
                     wx_server_url: "",
                     wx_auth: "",

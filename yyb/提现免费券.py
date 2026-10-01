@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import os
+import random
 import secrets
 import string
 import sys
@@ -74,6 +75,13 @@ def routes() -> list[tuple[str, str]]:
 
 
 def yyb_code(server: str, ref: str) -> str:
+    # 调用 wx.login 取码前先等一会儿：基准 YYB_CODE_DELAY_MS（默认 60000），实际等 0.75~1.5 倍
+    # 随机（默认 45~90 秒），避免多脚本同时启动后在同一秒向同一账号取码；设 0 关闭。
+    base_ms = int(os.getenv("YYB_CODE_DELAY_MS", "60000") or 0)
+    if base_ms > 0:
+        delay_ms = int(base_ms * random.uniform(0.75, 1.5))
+        print(f"⏳ 取码前等待 {delay_ms / 1000:g} 秒（调用 wx.login 前延时 + 随机抖动）", flush=True)
+        time.sleep(delay_ms / 1000)
     # YYB-Go：POST /wxapp/getCode，body {"ref": 账号标识, "app_id": 小程序 APPID}。
     headers = {}
     api_key = os.getenv("YYB_API_KEY", "").strip()
