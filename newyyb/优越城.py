@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-name: 优越城签到（yyb-go 版）
+name: 优越城签到
 cron: 18 10 * * *
 
 青龙环境变量：
