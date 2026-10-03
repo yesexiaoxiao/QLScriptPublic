@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 name: 优越城签到（yyb-go 版）
-cron: 18 8 * * *
+cron: 18 10 * * *
 
 青龙环境变量：
   YYB_SERVER       必填，YYB-Go-Enhanced地址@微信账号标识，多账号每行一条
