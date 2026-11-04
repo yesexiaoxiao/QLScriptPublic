@@ -72,6 +72,7 @@ import os
 import random
 import string
 import sys
+import threading
 import time
 import urllib.parse
 from dataclasses import asdict, dataclass
@@ -114,7 +115,12 @@ TZ = timezone(timedelta(hours=8))  # 小程序 iv/日期都用本地时间（境
 MALL_NO = os.getenv("YYBGO_MALL_NO", "142")
 SIGN_LAT = os.getenv("YYBGO_LAT", "")
 SIGN_LON = os.getenv("YYBGO_LON", "")
-CACHE_FILE = Path(os.getenv("YYBGO_CACHE_FILE", "/ql/data/config/yyb_go_wx09d8a738c7d4d31d.json"))
+CACHE_FILE = Path(
+    os.getenv(
+        "YYBGO_CACHE_FILE",
+        str(Path(__file__).resolve().parent / "tokencache" / "yyb_go_wx09d8a738c7d4d31d.json"),
+    )
+)
 # U() 注入的客户端字段（小程序端取自系统信息，脚本侧用固定合理值，可用环境变量覆盖）
 CLIENT_TYPE = "mini_weixin"
 CLIENT_APP_NAME = "memberClient"
@@ -129,6 +135,18 @@ CONFIG_VERSION = os.getenv("YYBGO_CONFIG_VERSION", "9")  # config.version（cust
 
 
 # --------------------------------------------------------------------- 通用
+# 微信接口节流：与上一次微信协议接口（YYB getCode）调用至少间隔 2 秒，避免调用过频触发风控/封号
+_last_wx_api_call_at = 0.0
+
+
+def throttle_wx_api(interval: float = 2.0) -> None:
+    global _last_wx_api_call_at
+    elapsed = time.time() - _last_wx_api_call_at
+    if elapsed < interval:
+        time.sleep(interval - elapsed)
+    _last_wx_api_call_at = time.time()
+
+
 def compact(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
@@ -418,6 +436,7 @@ class Mobcb:
     # ------------------------------------------------------------- YYB 通信
     def yyb(self, endpoint: str, extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """与 hrt.py 相同的 YYB-Go-Enhanced 调用方式。"""
+        throttle_wx_api()
         body: Dict[str, Any] = {"ref": self.account.ref, "app_id": APP_ID}
         if extra:
             body.update(extra)
@@ -994,16 +1013,38 @@ def load_notify():
     return None
 
 
-def notify(text: str) -> None:
+def notify(text: str, timeout: float = 30.0) -> bool:
+    """调用青龙 notify.py 发送通知；返回值表示「通知调用是否成功完成」。
+
+    青龙 notify.py 内部会吞掉各通道的发送异常，脚本侧无法拿到每个通道的投递结果，
+    只能判断调用是否正常结束；因此这里加超时保护（通知通道卡住时不拖死任务），
+    并把「完成 / 异常 / 超时」如实写入日志。通知失败不影响签到任务结果。
+    """
     func = load_notify()
     if not func:
         print("未找到青龙 notify.py，跳过通知")
-        return
-    try:
-        func("优越城签到", text)
-        print("青龙通知模块调用完成")
-    except Exception as exc:
-        print(f"青龙通知发送失败（不影响签到结果）：{safe_message(exc)}")
+        return False
+    errors: List[str] = []
+    finished = threading.Event()
+
+    def runner() -> None:
+        try:
+            func("优越城签到", text)
+        except Exception as exc:
+            errors.append(safe_message(exc))
+        finally:
+            finished.set()
+
+    worker = threading.Thread(target=runner, daemon=True)
+    worker.start()
+    if not finished.wait(timeout):
+        print(f"青龙通知未完成：调用超过 {timeout:.0f} 秒未返回（不影响签到结果）")
+        return False
+    if errors:
+        print(f"青龙通知未完成（不影响签到结果）：{errors[0]}")
+        return False
+    print("青龙通知调用完成")
+    return True
 
 
 def main() -> int:

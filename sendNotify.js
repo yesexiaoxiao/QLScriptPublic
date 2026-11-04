@@ -1512,7 +1512,12 @@ async function sendNotify(text, desp, params = {}) {
   }
 
   if (push_config.HITOKOTO !== 'false') {
-    desp += '\n\n' + (await one());
+    // 一言接口（v1.hitokoto.cn，Cloudflare 节点）不可达时只降级跳过，不能阻断真正的推送
+    try {
+      desp += '\n\n' + (await one());
+    } catch (error) {
+      console.log(`一言获取失败（不影响通知发送）：${error?.message || error}`);
+    }
   }
 
   await Promise.all([

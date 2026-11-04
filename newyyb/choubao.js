@@ -1,5 +1,12 @@
 // YYB-Go-Enhanced 适配说明：配置多行 YYB_SERVER=地址@账号标识；通知使用青龙 sendNotify。
 // ===== YYB-Go-Enhanced + QingLong standalone adapter =====
+/** 微信接口节流：与上一次微信协议接口调用至少间隔 2 秒，避免调用过频触发风控/封号 */
+let _lastWxApiCallAt = 0;
+async function _wxApiThrottle(intervalMs = 2000) {
+    const elapsed = Date.now() - _lastWxApiCallAt;
+    if (elapsed < intervalMs) await new Promise((resolve) => setTimeout(resolve, intervalMs - elapsed));
+    _lastWxApiCallAt = Date.now();
+}
 function _yybRoutes() {
     const routes = String(process.env.YYB_SERVER || '').split(/\r?\n/)
         .map(v => v.trim()).filter(Boolean).map((line, index) => {
@@ -31,6 +38,7 @@ function _yybRouteFor(identifier) {
 
 async function getSingleCode(appId, identifier) {
     const route = _yybRouteFor(identifier);
+    await _wxApiThrottle();
     const response = await axios.post(`${route.server}/wxapp/getCode`,
         { ref: route.ref, app_id: appId },
         { timeout: 30000, headers: { 'Content-Type': 'application/json' } });
@@ -54,6 +62,7 @@ global.resolveAccounts = _resolveYybAccounts;
 /** 统一的 YYB-Go 调用：GET 时 payload 作 query，POST 时作 body；code!=0 一律抛错 */
 async function _yybCall(identifier, method, apiPath, payload) {
     const route = _yybRouteFor(identifier);
+    await _wxApiThrottle();
     const options = {
         method,
         url: `${route.server}${apiPath}`,
@@ -99,21 +108,51 @@ global.getAccountInfo = getAccountInfo;
 global.operateWxData = operateWxData;
 global.encryptKey = encryptKey;
 
-async function _sendQingLongNotify(title, content) {
+const QL_NOTIFY_TIMEOUT_MS = 30000;
+
+/** 是否处于青龙环境（用于失败时给出准确提示） */
+function _inQingLong() {
+    return Boolean(process.env.QL_DIR) || process.cwd().replace(/\\/g, '/').startsWith('/ql');
+}
+
+/** 给通知调用加超时保护，避免通知通道卡住导致脚本一直不结束 */
+function _promiseTimeout(promise, ms, label) {
+    let timer;
+    const timeout = new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label}超过 ${Math.round(ms / 1000)} 秒未完成`)), ms);
+    });
+    return Promise.race([Promise.resolve().then(() => promise), timeout]).finally(() => clearTimeout(timer));
+}
+
+/** 加载青龙 sendNotify 模块；逐个记录候选路径失败原因，全部不可用时抛错 */
+function _loadQingLongNotify() {
     const candidates = ['./sendNotify', '../sendNotify', '/ql/data/scripts/sendNotify', '/ql/scripts/sendNotify'];
-    let lastError = null;
+    const reasons = [];
     for (const candidate of candidates) {
         try {
             const mod = require(candidate);
             const send = mod?.sendNotify || mod?.send;
-            if (typeof send === 'function') {
-                await send(title, content);
-                return true;
-            }
-        } catch (error) { lastError = error; }
+            if (typeof send === 'function') return { send, candidate };
+            reasons.push(`${candidate}: 模块内无 sendNotify/send 函数`);
+        } catch (error) {
+            reasons.push(`${candidate}: ${error?.code || error?.message || error}`);
+        }
     }
-    console.log(`青龙通知失败（不影响任务结果）：${lastError?.message || '未找到通知模块'}`);
-    return false;
+    throw new Error(reasons.join('；') || '候选路径为空');
+}
+
+/** 发送青龙通知；返回值表示「通知调用是否成功完成」，失败原因写入日志 */
+async function _sendQingLongNotify(title, content) {
+    try {
+        const { send, candidate } = _loadQingLongNotify();
+        await _promiseTimeout(send(title, content), QL_NOTIFY_TIMEOUT_MS, '青龙通知');
+        console.log(`青龙通知调用完成（模块：${candidate}）`);
+        return true;
+    } catch (error) {
+        const hint = _inQingLong() ? '' : '（当前非青龙环境且本地未找到 sendNotify 模块）';
+        console.log(`青龙通知未完成${hint}（不影响任务结果）：${error?.message || error}`);
+        return false;
+    }
 }
 const qlNotify = { sendNotify: _sendQingLongNotify, send: _sendQingLongNotify };
 // ===== adapter end =====
@@ -300,7 +339,12 @@ class Env {
         this.userCount = list.length;
         if (!this.userList.length) console.log('未配置可用的 YYB_SERVER 或脚本专用账号变量');
     }
-    async done() { try { const notify = qlNotify; await notify.sendNotify(this.name, this.logs.join('\n')); } catch (e) { console.log('通知发送失败', e); } }
+    async done() {
+        try {
+            const sent = await qlNotify.sendNotify(this.name, this.logs.join('\n'));
+            this.log(sent ? '✅ 青龙通知调用完成' : '⚠️ 青龙通知未完成，请检查上方失败原因');
+        } catch (e) { console.log('通知发送失败', e); }
+    }
 }const $ = new Env("臭宝乐园");
 let ckName = `choubaoleyuan`;
 const strSplitor = "#";
@@ -360,6 +404,27 @@ const axios = Object.assign(async function axios(config = {}) {
 const defaultUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 MicroMessenger/8.0.31(0x18001e31) NetType/WIFI Language/zh_CN miniProgram"
 let wechat = new WeChatServer({ appid: 'wx2206cca563f6f937' });
 
+// token 缓存：命中时跳过微信 getCode，减少微信协议调用频率，降低封号风险
+const fs = require("fs");
+const path = require("path");
+const TOKEN_CACHE_FILE = path.join(__dirname, "tokencache", "choubao_token_cache.json");
+
+function readTokenCache() {
+    try {
+        if (!fs.existsSync(TOKEN_CACHE_FILE)) return {};
+        return JSON.parse(fs.readFileSync(TOKEN_CACHE_FILE, "utf8")) || {};
+    } catch (e) { return {}; }
+}
+
+function writeTokenCache(cache) {
+    try {
+        fs.mkdirSync(path.dirname(TOKEN_CACHE_FILE), { recursive: true });
+        fs.writeFileSync(TOKEN_CACHE_FILE, JSON.stringify(cache, null, 2), "utf8");
+    } catch (e) {
+        $.log(`写入token缓存失败: ${e.message || e}`);
+    }
+}
+
 class Task {
     constructor(env) {
         this.index = $.userIdx++
@@ -371,6 +436,11 @@ class Task {
     async run() {
        //随机延迟5-30s 模拟人工操作
        await $.wait(Math.floor(Math.random() * 20 + 5) * 1000);
+        if (await this.tryCachedToken()) {
+            await this.track()
+            await this.checkSign()
+            return
+        }
         let { data: codeRes } = await wechat.getCode(this.wcsid)
         if (codeRes.status) {
             await this.getUserToken(codeRes.data.code)
@@ -380,10 +450,29 @@ class Task {
             return
         }
         this.token = 'Bearer' + this.token
+        this.saveTokenCache()
         await this.getUserInfo()
         await this.track()
         await this.checkSign()
-        
+
+    }
+    /** 缓存 token 命中且有效时返回 true，跳过微信 getCode 调用 */
+    async tryCachedToken() {
+        const cached = readTokenCache()[this.wcsid] || ""
+        if (!cached) return false
+        this.token = cached
+        $.log(`🌸账号[${this.index}] 使用缓存token: ${String(cached).slice(0, 15)}***`)
+        if (await this.getUserInfo()) return true
+        $.log(`🌸账号[${this.index}] 缓存token失效，重新登录`)
+        this.token = ""
+        return false
+    }
+    saveTokenCache() {
+        if (!this.token) return
+        const cache = readTokenCache()
+        cache[this.wcsid] = this.token
+        cache[`${this.wcsid}#updatedAt`] = new Date().toISOString()
+        writeTokenCache(cache)
     }
     async getUserToken(code) {
         let options = {
@@ -432,8 +521,10 @@ class Task {
         if (result?.status == '200') {
             //打印签到结果
             $.log(`🌸账号[${this.index}]` + `[${result.data.nickName}] 积分[${result.data.points}]🎉`);
+            return true
         } else {
             $.log(`🌸账号[${this.index}] 获取用户信息-失败:${result.msg}❌`)
+            return false
         }
     }
     async track() {

@@ -67,7 +67,12 @@ UA = (
 )
 # 微信运行时为 wx.request 自动附加的 Referer
 REFERER = f"https://servicewechat.com/{APP_ID}/91/page-frame.html"
-CACHE_FILE = Path(os.getenv("EZR_CACHE_FILE", "/ql/data/config/wx0d6431d3cfefd889.json"))
+CACHE_FILE = Path(
+    os.getenv(
+        "EZR_CACHE_FILE",
+        str(Path(__file__).resolve().parent / "tokencache" / "wx0d6431d3cfefd889.json"),
+    )
+)
 
 
 class SessionExpired(Exception):

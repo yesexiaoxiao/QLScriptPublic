@@ -995,7 +995,7 @@ def one() -> str:
     :return:
     """
     url = "https://v1.hitokoto.cn/"
-    res = requests.get(url).json()
+    res = requests.get(url, timeout=10).json()
     return res["hitokoto"] + "    ----" + res["from"]
 
 
@@ -1088,7 +1088,12 @@ def send(title: str, content: str, ignore_default_config: bool = False, **kwargs
             return
 
     hitokoto = push_config.get("HITOKOTO")
-    content += "\n\n" + one() if hitokoto != "false" else ""
+    # 一言接口不可达时只降级跳过，不能阻断真正的推送
+    if hitokoto != "false":
+        try:
+            content += "\n\n" + one()
+        except Exception as e:
+            print(f"一言获取失败（不影响通知发送）：{e}")
 
     notify_function = add_notify_function()
     ts = [
