@@ -434,8 +434,10 @@ function today() {
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
-function isTokenError(message) {
-    return /token|登录|授权|invalid|expire|过期|401|403/i.test(String(message || ""));
+function isTokenError(error) {
+    if (!error) return false;
+    if (error.isTokenError) return true;
+    return /token|登录|授权|invalid|expire|过期|401|403/i.test(String(error.message || error || ""));
 }
 
 class Task {
@@ -466,9 +468,31 @@ class Task {
             if (!this.token) return;
         }
 
+        try {
+            await this.runBusiness();
+        } catch (e) {
+            if (!isTokenError(e)) {
+                $.log(`账号[${this.index}] 签到失败: ${e.message || e}`);
+                return;
+            }
+            // 登录态在业务中途失效（隔天 token 过期等）：清缓存重登一次，再重试一轮
+            $.log(`账号[${this.index}] 登录态失效，自动重新登录并重试`);
+            this.removeCachedToken();
+            await this.loginByWxCode();
+            if (!this.token) return;
+            try {
+                await this.runBusiness();
+            } catch (e2) {
+                $.log(`账号[${this.index}] 签到失败: ${e2.message || e2}`);
+            }
+        }
+        this.saveCachedToken();
+    }
+
+    /** 业务主流程：取活动 → 签到。登录态失效会抛出（供 run 重登重试） */
+    async runBusiness() {
         await this.getCampaignId();
         await this.doSign();
-        this.saveCachedToken();
     }
 
     getCachedToken() {
@@ -537,8 +561,11 @@ class Task {
         const { status, data: result } = await axios.request(requestOptions);
         if (status !== 200) throw new Error(`HTTP ${status}: ${JSON.stringify(result)}`);
         if (!options.allowAnyCode && result?.resultCode !== "1") {
-            const err = new Error(result?.msg || JSON.stringify(result));
+            const text = result?.msg || result?.info || JSON.stringify(result);
+            const err = new Error(text);
             err.resultCode = result?.resultCode;
+            err.isTokenError = result?.loginLevelEnum === "NEED_LOGIN"
+                || /登录|token|授权/i.test(String(text));
             throw err;
         }
         return result;
@@ -571,9 +598,12 @@ class Task {
     }
 
     async checkToken() {
+        // 强制清掉可能来自缓存恢复的 campaignId，确保真实请求一次，
+        // 防止校验被缓存短路（隔天 token 已过期却仍判定有效的问题根因）
+        this.campaignId = "";
         try {
             await this.getCampaignId(true);
-            return true;
+            return Boolean(this.token) && Boolean(this.campaignId);
         } catch (e) {
             return false;
         }
@@ -601,38 +631,32 @@ class Task {
     }
 
     async doSign() {
-        try {
-            const before = await this.getSignInfo();
-            const signDays = Array.isArray(before.signDays) ? before.signDays : [];
-            const todayStatus = signDays.find((item) => normalizeDate(item.signDay) === today());
-            const dailyTask = Array.isArray(before.assignDetail)
-                ? before.assignDetail.find((item) => item.assignmentName && item.assignmentName.includes("单日"))
-                : null;
-            if (todayStatus?.signStatus === 1 || dailyTask?.completeStatus === 1) {
+        const before = await this.getSignInfo();
+        const signDays = Array.isArray(before.signDays) ? before.signDays : [];
+        const todayStatus = signDays.find((item) => normalizeDate(item.signDay) === today());
+        const dailyTask = Array.isArray(before.assignDetail)
+            ? before.assignDetail.find((item) => item.assignmentName && item.assignmentName.includes("单日"))
+            : null;
+        if (todayStatus?.signStatus === 1 || dailyTask?.completeStatus === 1) {
+            $.log(`账号[${this.index}] 今日已签到`);
+            return;
+        }
+
+        const sign = await this.request("POST", "estore-campaign/member/sign/do", {}, { allowAnyCode: true });
+        if (sign.resultCode !== "1") {
+            const message = sign.msg || sign.info || JSON.stringify(sign);
+            if (/已签|重复/.test(message)) {
                 $.log(`账号[${this.index}] 今日已签到`);
                 return;
             }
-
-            const sign = await this.request("POST", "estore-campaign/member/sign/do", {}, { allowAnyCode: true });
-            if (sign.resultCode !== "1") {
-                const message = sign.msg || JSON.stringify(sign);
-                if (/已签|重复/.test(message)) {
-                    $.log(`账号[${this.index}] 今日已签到`);
-                    return;
-                }
-                throw new Error(message);
-            }
-
-            const after = await this.getSignInfo();
-            const task = Array.isArray(after.assignDetail)
-                ? after.assignDetail.find((item) => item.assignmentName && item.assignmentName.includes("单日"))
-                : null;
-            $.log(`账号[${this.index}] 签到成功: +${task?.awardPrice || "未知"}积分`);
-        } catch (e) {
-            const message = e.message || e;
-            $.log(`账号[${this.index}] 签到失败: ${message}`);
-            if (isTokenError(message)) this.removeCachedToken();
+            throw new Error(message);
         }
+
+        const after = await this.getSignInfo();
+        const task = Array.isArray(after.assignDetail)
+            ? after.assignDetail.find((item) => item.assignmentName && item.assignmentName.includes("单日"))
+            : null;
+        $.log(`账号[${this.index}] 签到成功: +${task?.awardPrice || "未知"}积分`);
     }
 }
 
